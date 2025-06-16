@@ -1,0 +1,127 @@
+import os
+import shutil
+import zipfile
+from flask import Flask, request, render_template, send_file
+from werkzeug.utils import secure_filename
+from googletrans import Translator
+import fitz  # PyMuPDF
+from docx import Document
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
+
+app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+TRANSLATED_FOLDER = "translated"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TRANSLATED_FOLDER, exist_ok=True)
+
+translator = Translator()
+
+LANGUAGES = {
+    'auto': 'Auto Detect',
+    'en': 'English',
+    'hi': 'Hindi',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'fr': 'French',
+    'de': 'German',
+    'it': 'Italian'
+}
+
+
+def translate_text(text, src_lang, dest_lang):
+    try:
+        result = translator.translate(text, src=src_lang, dest=dest_lang)
+        return result.text
+    except Exception as e:
+        print("Translation Error:", e)
+        return "[Translation failed]"
+
+
+def extract_text_pdf(path):
+    text = ""
+    try:
+        doc = fitz.open(path)
+        for page in doc:
+            page_text = page.get_text()
+            if page_text.strip():
+                text += page_text + "\n"
+        doc.close()
+    except Exception as e:
+        print("PDF text extract error:", e)
+    return text.strip()
+
+
+def extract_text_ocr(path):
+    try:
+        images = convert_from_path(path)
+        text = ""
+        for img in images:
+            text += pytesseract.image_to_string(img, lang='eng') + "\n"
+        return text.strip()
+    except Exception as e:
+        print("OCR fallback error:", e)
+        return ""
+
+
+def translate_pdf(path, src, dest):
+    base = os.path.basename(path)
+    name = os.path.splitext(base)[0]
+    out_path = os.path.join(TRANSLATED_FOLDER, f"{name}_translated.txt")
+    text = extract_text_pdf(path)
+    if not text:
+        print("Falling back to OCR...", path)
+        text = extract_text_ocr(path)
+    translated = translate_text(text, src, dest)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(translated)
+    return out_path
+
+
+def translate_docx(path, src, dest):
+    base = os.path.basename(path)
+    name = os.path.splitext(base)[0]
+    out_path = os.path.join(TRANSLATED_FOLDER, f"{name}_translated.docx")
+    doc = Document(path)
+    translated_doc = Document()
+    for para in doc.paragraphs:
+        translated_text = translate_text(para.text, src, dest)
+        translated_doc.add_paragraph(translated_text)
+    translated_doc.save(out_path)
+    return out_path
+
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        src_lang = request.form['src_lang']
+        dest_lang = request.form['dest_lang']
+        files = request.files.getlist("files")
+
+        shutil.rmtree(TRANSLATED_FOLDER)
+        os.makedirs(TRANSLATED_FOLDER, exist_ok=True)
+
+        for file in files:
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            file.save(filepath)
+
+            if filename.lower().endswith(".pdf"):
+                translate_pdf(filepath, src_lang, dest_lang)
+            elif filename.lower().endswith(".docx"):
+                translate_docx(filepath, src_lang, dest_lang)
+
+        zip_path = "translated_documents.zip"
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for root, _, files in os.walk(TRANSLATED_FOLDER):
+                for f in files:
+                    zipf.write(os.path.join(root, f), arcname=f)
+
+        return send_file(zip_path, as_attachment=True)
+
+    return render_template("index.html", languages=LANGUAGES)
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
